@@ -247,3 +247,6 @@ if __name__ == '__main__':
     load_model()
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
+else:
+    # gunicorn รัน — โหลด model ตอน import
+    load_model()
