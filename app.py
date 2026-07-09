@@ -28,7 +28,7 @@ JWT_SECRET      = os.environ.get('JWT_SECRET', 'osa-detect-secret-2024')
 JWT_EXPIRE_DAYS = 30
 
 SAMPLE_RATE   = 16000
-CLIP_DURATION = 30.0
+CLIP_DURATION = 10.0
 N_MELS        = 64
 N_FFT         = 1024
 HOP_LENGTH    = 512
@@ -141,7 +141,7 @@ class DWSConv(nn.Module):
     def forward(self, x): return self.net(x)
 
 class OSAModel(nn.Module):
-    def __init__(self, n_classes=3):
+    def __init__(self, n_classes=2):
         super().__init__()
         self.features = nn.Sequential(
             nn.Conv2d(1, 32, 3, stride=2, padding=1, bias=False),
@@ -167,7 +167,7 @@ def load_model():
     if not os.path.exists(path):
         return
     try:
-        model = OSAModel(n_classes=3)
+        model = OSAModel(n_classes=2)
         model.load_state_dict(torch.load(path, map_location='cpu'))
         model.eval()
         print('✅ Model loaded')
@@ -247,15 +247,12 @@ def analyze_audio(audio_bytes, filename='audio.m4a'):
             conf      = float(probs[predicted])
             t_str     = f'{int(t_start//3600):02d}:{int((t_start%3600)//60):02d}:{int(t_start%60):02d}'
 
-            if predicted == 2 and conf >= 0.6:
+            if predicted == 1 and conf >= 0.6:
                 events.append({'type': 'apnea', 'time': t_str, 'timestamp': float(t_start),
                                'confidence': round(conf*100,1), 'msg': f'⚠️ หยุดหายใจ ({conf*100:.0f}%)'})
-            elif predicted == 1 and conf >= 0.6:
-                events.append({'type': 'snore', 'time': t_str, 'timestamp': float(t_start),
-                               'confidence': round(conf*100,1), 'msg': f'🔊 เสียงกรน ({conf*100:.0f}%)'})
 
         apnea_count = sum(1 for e in events if e['type'] == 'apnea')
-        snore_count = sum(1 for e in events if e['type'] == 'snore')
+        snore_count = 0
         ahi         = round(apnea_count / max(total_duration/3600, 1/60), 1)
         risk        = 'ปกติ' if ahi < 5 else 'เล็กน้อย' if ahi < 15 else 'ปานกลาง' if ahi < 30 else 'รุนแรง'
 
