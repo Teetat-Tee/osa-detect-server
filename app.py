@@ -247,7 +247,8 @@ def analyze_audio(audio_bytes, filename='audio.m4a'):
             conf      = float(probs[predicted])
             t_str     = f'{int(t_start//3600):02d}:{int((t_start%3600)//60):02d}:{int(t_start%60):02d}'
 
-            if predicted == 1 and conf >= 0.6:
+            conf_threshold = 0.45  # ลดจาก 0.6 เพื่อจับได้มากขึ้น
+            if predicted == 1 and conf >= conf_threshold:
                 events.append({'type': 'apnea', 'time': t_str, 'timestamp': float(t_start),
                                'confidence': round(conf*100,1), 'msg': f'⚠️ หยุดหายใจ ({conf*100:.0f}%)'})
 
