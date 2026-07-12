@@ -456,6 +456,25 @@ def analyze():
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
+# --- AI Inference (base64 — stable กว่าบน iOS) ---
+@app.route('/analyze_base64', methods=['POST'])
+@require_auth
+def analyze_base64():
+    import base64
+    if model is None:
+        return jsonify({'success': False, 'error': 'Model ยังไม่ถูกโหลด'}), 503
+    data = request.json or {}
+    b64  = data.get('audio_base64', '')
+    if not b64:
+        return jsonify({'success': False, 'error': 'ไม่พบข้อมูลเสียง'}), 400
+    try:
+        audio_bytes = base64.b64decode(b64)
+        print(f'[ANALYZE_B64] decoded {len(audio_bytes)} bytes')
+        return jsonify(analyze_audio(audio_bytes, 'chunk.m4a'))
+    except Exception as e:
+        print(f'[ANALYZE_B64] error: {e}')
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 # ============================================================
 if __name__ == '__main__':
     init_db()
