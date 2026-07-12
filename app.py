@@ -3,11 +3,10 @@ OSA Detect — Backend API Server
 Render.com + PostgreSQL
 """
 
-import os, json, tempfile, hashlib
+import os, json, tempfile, hashlib, subprocess
 import numpy as np
 import torch
 import torch.nn as nn
-import librosa
 import bcrypt
 import jwt
 import psycopg2
@@ -16,6 +15,10 @@ from datetime import datetime, timedelta
 from flask import Flask, request, jsonify, g
 from flask_cors import CORS
 from functools import wraps
+
+# จำกัด torch ใช้ RAM/thread น้อยลง (Render free tier 512MB)
+torch.set_num_threads(1)
+torch.set_grad_enabled(False)
 
 app = Flask(__name__)
 CORS(app)
@@ -206,36 +209,89 @@ def softmax(x):
     e = np.exp(x - np.max(x))
     return e / e.sum()
 
+# ── Mel filterbank สร้างครั้งเดียว (cache) ──
+_MEL_FB = None
+
+def _get_mel_filterbank():
+    """สร้าง mel filterbank ด้วย numpy ล้วน — แทน librosa"""
+    global _MEL_FB
+    if _MEL_FB is not None:
+        return _MEL_FB
+
+    def hz_to_mel(hz):
+        return 2595.0 * np.log10(1.0 + hz / 700.0)
+    def mel_to_hz(mel):
+        return 700.0 * (10.0 ** (mel / 2595.0) - 1.0)
+
+    n_freqs = N_FFT // 2 + 1
+    mel_min = hz_to_mel(0)
+    mel_max = hz_to_mel(SAMPLE_RATE / 2)
+    mel_pts = np.linspace(mel_min, mel_max, N_MELS + 2)
+    hz_pts  = mel_to_hz(mel_pts)
+    bins    = np.floor((N_FFT + 1) * hz_pts / SAMPLE_RATE).astype(int)
+
+    fb = np.zeros((N_MELS, n_freqs), dtype=np.float32)
+    for m in range(1, N_MELS + 1):
+        f_left, f_center, f_right = bins[m-1], bins[m], bins[m+1]
+        for k in range(f_left, f_center):
+            if f_center > f_left:
+                fb[m-1, k] = (k - f_left) / (f_center - f_left)
+        for k in range(f_center, f_right):
+            if f_right > f_center:
+                fb[m-1, k] = (f_right - k) / (f_right - f_center)
+    _MEL_FB = fb
+    return fb
+
+# Hann window cache
+_HANN = np.hanning(N_FFT).astype(np.float32)
+
 def audio_to_logmel(y):
+    """คำนวณ log-mel spectrogram ด้วย numpy ล้วน — ไม่ใช้ librosa"""
     if len(y) < SAMPLES:
         y = np.pad(y, (0, SAMPLES - len(y)))
     else:
         y = y[:SAMPLES]
-    mel     = librosa.feature.melspectrogram(y=y, sr=SAMPLE_RATE, n_mels=N_MELS, n_fft=N_FFT, hop_length=HOP_LENGTH)
-    log_mel = librosa.power_to_db(mel, ref=np.max)
+    y = y.astype(np.float32)
+
+    n_frames = 1 + (len(y) - N_FFT) // HOP_LENGTH
+    fb       = _get_mel_filterbank()
+    n_freqs  = N_FFT // 2 + 1
+
+    # STFT → power spectrum
+    power = np.empty((n_freqs, n_frames), dtype=np.float32)
+    for i in range(n_frames):
+        start = i * HOP_LENGTH
+        frame = y[start:start+N_FFT] * _HANN
+        spec  = np.fft.rfft(frame, n=N_FFT)
+        power[:, i] = (spec.real**2 + spec.imag**2).astype(np.float32)
+
+    # mel + log
+    mel     = fb @ power                      # (N_MELS, n_frames)
+    log_mel = 10.0 * np.log10(np.maximum(mel, 1e-10))
+    # normalize เหมือน power_to_db(ref=max) แล้ว scale 0-1
+    log_mel = log_mel - log_mel.max()
     log_mel = (log_mel - log_mel.min()) / (log_mel.max() - log_mel.min() + 1e-8)
     return log_mel.astype(np.float32)
 
 def load_audio_lowmem(path):
-    """โหลด audio แบบประหยัด RAM — แปลง m4a เป็น wav ก่อนด้วย ffmpeg ถ้ามี"""
-    import subprocess, shutil
-    wav_path = path + '.wav'
+    """โหลด audio ด้วย ffmpeg → raw PCM → numpy (ไม่ใช้ librosa เลย)"""
+    wav_path = path + '.raw'
     try:
-        # ลอง ffmpeg ก่อน (ถ้ามี) — ใช้ RAM น้อยกว่า audioread
-        if shutil.which('ffmpeg'):
-            subprocess.run(
-                ['ffmpeg', '-y', '-i', path, '-ar', str(SAMPLE_RATE), '-ac', '1', wav_path],
-                capture_output=True, timeout=30
-            )
-            y, sr = librosa.load(wav_path, sr=SAMPLE_RATE, mono=True)
-            return y, sr
-    except Exception:
-        pass
+        # ffmpeg decode เป็น raw float32 PCM mono 16kHz
+        subprocess.run(
+            ['ffmpeg', '-y', '-i', path,
+             '-ar', str(SAMPLE_RATE), '-ac', '1',
+             '-f', 'f32le', wav_path],
+            capture_output=True, timeout=30, check=True
+        )
+        y = np.fromfile(wav_path, dtype=np.float32)
+        return y, SAMPLE_RATE
+    except Exception as e:
+        print(f'[AUDIO] ffmpeg failed: {e}')
+        raise
     finally:
         if os.path.exists(wav_path):
             os.unlink(wav_path)
-    # fallback: librosa โดยตรง
-    return librosa.load(path, sr=SAMPLE_RATE, mono=True)
 
 def analyze_audio(audio_bytes, filename='audio.m4a'):
     import gc
