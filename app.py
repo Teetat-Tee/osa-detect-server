@@ -28,7 +28,7 @@ JWT_SECRET      = os.environ.get('JWT_SECRET', 'osa-detect-secret-2024')
 JWT_EXPIRE_DAYS = 30
 
 SAMPLE_RATE   = 16000
-CLIP_DURATION = 30.0
+CLIP_DURATION = 10.0
 N_MELS        = 64
 N_FFT         = 1024
 HOP_LENGTH    = 512
@@ -235,6 +235,7 @@ def analyze_audio(audio_bytes, filename='audio.m4a'):
             clips.append(y_full)
             timestamps.append(0)
 
+        print(f'[ANALYZE] duration={total_duration:.1f}s clips={len(clips)} CLIP_DURATION={CLIP_DURATION}')
         events = []
         for clip, t_start in zip(clips, timestamps):
             spec   = audio_to_logmel(clip)
@@ -245,6 +246,8 @@ def analyze_audio(audio_bytes, filename='audio.m4a'):
             predicted = int(np.argmax(probs))
             conf      = float(probs[predicted])
             t_str     = f'{int(t_start//3600):02d}:{int((t_start%3600)//60):02d}:{int(t_start%60):02d}'
+
+            print(f'[CLIP] t={t_start:.0f}s logits={[round(float(l),3) for l in logits.tolist()]} probs={[round(float(p),3) for p in probs.tolist()]} predicted={predicted} conf={conf:.3f}')
 
             # model เป็น binary: CLASS_NORMAL=0, CLASS_APNEA=1
             conf_threshold = 0.40
