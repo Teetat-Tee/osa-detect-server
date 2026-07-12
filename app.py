@@ -238,65 +238,78 @@ def load_audio_lowmem(path):
     return librosa.load(path, sr=SAMPLE_RATE, mono=True)
 
 def analyze_audio(audio_bytes, filename='audio.m4a'):
+    import gc
     suffix = os.path.splitext(filename)[-1] or '.m4a'
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
         f.write(audio_bytes)
         tmp_path = f.name
+
+    # ล้าง audio_bytes ออกจาก memory ทันที
+    del audio_bytes
+    gc.collect()
+
     try:
         y_full, _      = load_audio_lowmem(tmp_path)
         total_duration = len(y_full) / SAMPLE_RATE
 
-        # chunk นี้ควรสั้น (30 วิ) แต่ป้องกัน OOM ถ้าส่งมายาวเกิน
-        MAX_DURATION = 60.0
+        # ป้องกัน OOM ถ้าส่งมายาวเกิน
+        MAX_DURATION = 45.0
         if total_duration > MAX_DURATION:
             print(f'[WARN] chunk too long ({total_duration:.1f}s), trimming to {MAX_DURATION}s')
             y_full = y_full[:int(MAX_DURATION * SAMPLE_RATE)]
             total_duration = MAX_DURATION
 
-        clip_hop       = int(SAMPLE_RATE * CLIP_DURATION * 0.5)
-        clips, timestamps = [], []
-        offset = 0
-        while offset + SAMPLES <= len(y_full):
-            clips.append(y_full[offset:offset+SAMPLES])
-            timestamps.append(offset / SAMPLE_RATE)
-            offset += clip_hop
-        if not clips:
-            clips.append(y_full)
-            timestamps.append(0)
+        # แบ่ง clip แบบ streaming — ไม่เก็บ list ทั้งหมด
+        clip_hop  = int(SAMPLE_RATE * CLIP_DURATION * 0.5)
+        n_clips   = max(1, (len(y_full) - SAMPLES) // clip_hop + 1)
+        print(f'[ANALYZE] duration={total_duration:.1f}s n_clips={n_clips} CLIP_DURATION={CLIP_DURATION}')
 
-        # ล้าง y_full ออกจาก RAM ก่อน inference
-        del y_full
+        events         = []
+        conf_threshold = 0.40
 
-        print(f'[ANALYZE] duration={total_duration:.1f}s clips={len(clips)} CLIP_DURATION={CLIP_DURATION}')
-        events = []
-        for clip, t_start in zip(clips, timestamps):
+        for i in range(n_clips):
+            offset = i * clip_hop
+            if offset + SAMPLES > len(y_full):
+                clip = y_full[offset:]
+            else:
+                clip = y_full[offset:offset+SAMPLES]
+            t_start = offset / SAMPLE_RATE
+
+            # inference แต่ละ clip แล้ว cleanup
             spec   = audio_to_logmel(clip)
             tensor = torch.FloatTensor(spec).unsqueeze(0).unsqueeze(0)
             with torch.no_grad():
                 logits = model(tensor).numpy()[0]
+
             probs     = softmax(logits)
             predicted = int(np.argmax(probs))
             conf      = float(probs[predicted])
             t_str     = f'{int(t_start//3600):02d}:{int((t_start%3600)//60):02d}:{int(t_start%60):02d}'
 
-            print(f'[CLIP] t={t_start:.0f}s logits={[round(float(l),3) for l in logits.tolist()]} probs={[round(float(p),3) for p in probs.tolist()]} predicted={predicted} conf={conf:.3f}')
+            print(f'[CLIP] t={t_start:.0f}s probs={[round(float(p),3) for p in probs.tolist()]} pred={predicted} conf={conf:.3f}')
 
-            # model เป็น binary: CLASS_NORMAL=0, CLASS_APNEA=1
-            conf_threshold = 0.40
             if predicted == 1 and conf >= conf_threshold:
                 events.append({'type': 'apnea', 'time': t_str, 'timestamp': float(t_start),
                                'confidence': round(conf*100,1), 'msg': f'หยุดหายใจ ({conf*100:.0f}%)'})
 
+            # cleanup ทันทีทุก clip
+            del spec, tensor, logits, probs, clip
+            gc.collect()
+
+        del y_full
+        gc.collect()
+
         apnea_count = sum(1 for e in events if e['type'] == 'apnea')
-        snore_count = 0
         ahi         = round(apnea_count / max(total_duration/3600, 1/60), 1)
         risk        = 'ปกติ' if ahi < 5 else 'เล็กน้อย' if ahi < 15 else 'ปานกลาง' if ahi < 30 else 'รุนแรง'
 
         return {'success': True, 'duration': round(total_duration), 'ahi': ahi,
-                'riskLabel': risk, 'apneaCount': apnea_count, 'snoreCount': snore_count,
+                'riskLabel': risk, 'apneaCount': apnea_count, 'snoreCount': 0,
                 'events': events, 'engine': 'ai-server'}
     finally:
-        os.unlink(tmp_path)
+        try: os.unlink(tmp_path)
+        except: pass
+        gc.collect()
 
 # ============================================================
 # Routes
