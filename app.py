@@ -28,7 +28,7 @@ JWT_SECRET      = os.environ.get('JWT_SECRET', 'osa-detect-secret-2024')
 JWT_EXPIRE_DAYS = 30
 
 SAMPLE_RATE   = 16000
-CLIP_DURATION = 10.0
+CLIP_DURATION = 30.0
 N_MELS        = 64
 N_FFT         = 1024
 HOP_LENGTH    = 512
@@ -245,16 +245,22 @@ def analyze_audio(audio_bytes, filename='audio.m4a'):
             conf      = float(probs[predicted])
             t_str     = f'{int(t_start//3600):02d}:{int((t_start%3600)//60):02d}:{int(t_start%60):02d}'
 
-            if predicted == 1 and conf >= 0.45:
+            # CLASS_NORMAL=0, CLASS_SNORING=1, CLASS_APNEA=2
+            conf_threshold = 0.40
+            if predicted == 2 and conf >= conf_threshold:
                 events.append({'type': 'apnea', 'time': t_str, 'timestamp': float(t_start),
-                               'confidence': round(conf*100,1), 'msg': f'⚠️ หยุดหายใจ ({conf*100:.0f}%)'})
+                               'confidence': round(conf*100,1), 'msg': f'หยุดหายใจ ({conf*100:.0f}%)'})
+            elif predicted == 1 and conf >= conf_threshold:
+                events.append({'type': 'snore', 'time': t_str, 'timestamp': float(t_start),
+                               'confidence': round(conf*100,1), 'msg': f'เสียงกรน ({conf*100:.0f}%)'})
 
         apnea_count = sum(1 for e in events if e['type'] == 'apnea')
+        snore_count = sum(1 for e in events if e['type'] == 'snore')
         ahi         = round(apnea_count / max(total_duration/3600, 1/60), 1)
         risk        = 'ปกติ' if ahi < 5 else 'เล็กน้อย' if ahi < 15 else 'ปานกลาง' if ahi < 30 else 'รุนแรง'
 
         return {'success': True, 'duration': round(total_duration), 'ahi': ahi,
-                'riskLabel': risk, 'apneaCount': apnea_count, 'snoreCount': 0,
+                'riskLabel': risk, 'apneaCount': apnea_count, 'snoreCount': snore_count,
                 'events': events, 'engine': 'ai-server'}
     finally:
         os.unlink(tmp_path)
