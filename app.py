@@ -216,14 +216,43 @@ def audio_to_logmel(y):
     log_mel = (log_mel - log_mel.min()) / (log_mel.max() - log_mel.min() + 1e-8)
     return log_mel.astype(np.float32)
 
+def load_audio_lowmem(path):
+    """โหลด audio แบบประหยัด RAM — แปลง m4a เป็น wav ก่อนด้วย ffmpeg ถ้ามี"""
+    import subprocess, shutil
+    wav_path = path + '.wav'
+    try:
+        # ลอง ffmpeg ก่อน (ถ้ามี) — ใช้ RAM น้อยกว่า audioread
+        if shutil.which('ffmpeg'):
+            subprocess.run(
+                ['ffmpeg', '-y', '-i', path, '-ar', str(SAMPLE_RATE), '-ac', '1', wav_path],
+                capture_output=True, timeout=30
+            )
+            y, sr = librosa.load(wav_path, sr=SAMPLE_RATE, mono=True)
+            return y, sr
+    except Exception:
+        pass
+    finally:
+        if os.path.exists(wav_path):
+            os.unlink(wav_path)
+    # fallback: librosa โดยตรง
+    return librosa.load(path, sr=SAMPLE_RATE, mono=True)
+
 def analyze_audio(audio_bytes, filename='audio.m4a'):
     suffix = os.path.splitext(filename)[-1] or '.m4a'
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
         f.write(audio_bytes)
         tmp_path = f.name
     try:
-        y_full, _      = librosa.load(tmp_path, sr=SAMPLE_RATE, mono=True)
+        y_full, _      = load_audio_lowmem(tmp_path)
         total_duration = len(y_full) / SAMPLE_RATE
+
+        # chunk นี้ควรสั้น (30 วิ) แต่ป้องกัน OOM ถ้าส่งมายาวเกิน
+        MAX_DURATION = 60.0
+        if total_duration > MAX_DURATION:
+            print(f'[WARN] chunk too long ({total_duration:.1f}s), trimming to {MAX_DURATION}s')
+            y_full = y_full[:int(MAX_DURATION * SAMPLE_RATE)]
+            total_duration = MAX_DURATION
+
         clip_hop       = int(SAMPLE_RATE * CLIP_DURATION * 0.5)
         clips, timestamps = [], []
         offset = 0
@@ -234,6 +263,9 @@ def analyze_audio(audio_bytes, filename='audio.m4a'):
         if not clips:
             clips.append(y_full)
             timestamps.append(0)
+
+        # ล้าง y_full ออกจาก RAM ก่อน inference
+        del y_full
 
         print(f'[ANALYZE] duration={total_duration:.1f}s clips={len(clips)} CLIP_DURATION={CLIP_DURATION}')
         events = []
