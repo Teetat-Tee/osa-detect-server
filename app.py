@@ -35,12 +35,11 @@ HOP_LENGTH    = 512
 SAMPLES       = int(SAMPLE_RATE * CLIP_DURATION)
 
 # ============================================================
-# Database — auto-create tables on startup
+# Database
 # ============================================================
 def get_db():
     if 'db' not in g:
         url = DATABASE_URL
-        # Render ใช้ postgres:// แต่ psycopg2 ต้องการ postgresql://
         if url.startswith('postgres://'):
             url = url.replace('postgres://', 'postgresql://', 1)
         g.db = psycopg2.connect(url, cursor_factory=psycopg2.extras.RealDictCursor)
@@ -62,7 +61,6 @@ def query(sql, params=None, fetch='all'):
     return cur.fetchall()
 
 def init_db():
-    """สร้าง tables ถ้ายังไม่มี"""
     try:
         url = DATABASE_URL
         if url.startswith('postgres://'):
@@ -191,7 +189,7 @@ def require_auth(f):
         if not token:
             return jsonify({'error': 'ต้องการ token'}), 401
         try:
-            payload  = jwt.decode(token, JWT_SECRET, algorithms=['HS256'])
+            payload   = jwt.decode(token, JWT_SECRET, algorithms=['HS256'])
             g.user_id = payload['user_id']
         except jwt.ExpiredSignatureError:
             return jsonify({'error': 'Token หมดอายุ'}), 401
@@ -247,18 +245,16 @@ def analyze_audio(audio_bytes, filename='audio.m4a'):
             conf      = float(probs[predicted])
             t_str     = f'{int(t_start//3600):02d}:{int((t_start%3600)//60):02d}:{int(t_start%60):02d}'
 
-            conf_threshold = 0.45  # ลดจาก 0.6 เพื่อจับได้มากขึ้น
-            if predicted == 1 and conf >= conf_threshold:
+            if predicted == 1 and conf >= 0.45:
                 events.append({'type': 'apnea', 'time': t_str, 'timestamp': float(t_start),
                                'confidence': round(conf*100,1), 'msg': f'⚠️ หยุดหายใจ ({conf*100:.0f}%)'})
 
         apnea_count = sum(1 for e in events if e['type'] == 'apnea')
-        snore_count = 0
         ahi         = round(apnea_count / max(total_duration/3600, 1/60), 1)
         risk        = 'ปกติ' if ahi < 5 else 'เล็กน้อย' if ahi < 15 else 'ปานกลาง' if ahi < 30 else 'รุนแรง'
 
         return {'success': True, 'duration': round(total_duration), 'ahi': ahi,
-                'riskLabel': risk, 'apneaCount': apnea_count, 'snoreCount': snore_count,
+                'riskLabel': risk, 'apneaCount': apnea_count, 'snoreCount': 0,
                 'events': events, 'engine': 'ai-server'}
     finally:
         os.unlink(tmp_path)
@@ -312,11 +308,17 @@ def me():
 @require_auth
 def update_profile():
     data = request.json or {}
-    query('UPDATE users SET first_name=%s,last_name=%s,age=%s,conditions=%s WHERE id=%s',
-          (data.get('firstName'), data.get('lastName'), data.get('age'), data.get('conditions'), g.user_id),
-          fetch='none')
-    user = query('SELECT id,email,first_name,last_name,gender,age,conditions FROM users WHERE id=%s',
-                 (g.user_id,), fetch='one')
+    # ✅ เพิ่ม gender ที่หายไป
+    query(
+        'UPDATE users SET first_name=%s, last_name=%s, gender=%s, age=%s, conditions=%s WHERE id=%s',
+        (data.get('firstName'), data.get('lastName'), data.get('gender'),
+         data.get('age'), data.get('conditions'), g.user_id),
+        fetch='none'
+    )
+    user = query(
+        'SELECT id,email,first_name,last_name,gender,age,conditions FROM users WHERE id=%s',
+        (g.user_id,), fetch='one'
+    )
     return jsonify({'success': True, 'user': dict(user)})
 
 # --- Sessions ---
