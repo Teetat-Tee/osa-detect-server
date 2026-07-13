@@ -532,14 +532,26 @@ def analyze_base64():
     import base64
     if model is None:
         return jsonify({'success': False, 'error': 'Model ยังไม่ถูกโหลด'}), 503
-    data = request.json or {}
-    b64  = data.get('audio_base64', '')
+    data        = request.json or {}
+    b64         = data.get('audio_base64', '')
+    chunk_start = float(data.get('chunk_start', 0))
     if not b64:
         return jsonify({'success': False, 'error': 'ไม่พบข้อมูลเสียง'}), 400
     try:
         audio_bytes = base64.b64decode(b64)
-        print(f'[ANALYZE_B64] decoded {len(audio_bytes)} bytes')
-        return jsonify(analyze_audio(audio_bytes, 'chunk.m4a'))
+        print(f'[ANALYZE_B64] decoded {len(audio_bytes)} bytes, chunk_start={chunk_start}')
+        result = analyze_audio(audio_bytes, 'chunk.m4a')
+        # ปรับ timestamp ของ events ให้ตรงกับ session จริง
+        for ev in result.get('events', []):
+            ev['timestamp'] = ev.get('timestamp', 0) + chunk_start
+            total_sec = ev['timestamp']
+            ev['time'] = f'{int(total_sec//3600):02d}:{int((total_sec%3600)//60):02d}:{int(total_sec%60):02d}'
+        # return แค่ events + duration ไม่คำนวณ AHI per chunk
+        return jsonify({
+            'success':  True,
+            'events':   result.get('events', []),
+            'duration': result.get('duration', 0),
+        })
     except Exception as e:
         print(f'[ANALYZE_B64] error: {e}')
         return jsonify({'success': False, 'error': str(e)}), 500
