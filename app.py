@@ -316,12 +316,26 @@ def analyze_audio(audio_bytes, filename='audio.m4a'):
             total_duration = MAX_DURATION
 
         # แบ่ง clip แบบ streaming — ไม่เก็บ list ทั้งหมด
-        clip_hop  = int(SAMPLE_RATE * CLIP_DURATION * 0.5)
+        clip_hop  = int(SAMPLE_RATE * CLIP_DURATION)  # ไม่ overlap — ลดการนับซ้ำ
         n_clips   = max(1, (len(y_full) - SAMPLES) // clip_hop + 1)
         print(f'[ANALYZE] duration={total_duration:.1f}s n_clips={n_clips} CLIP_DURATION={CLIP_DURATION}')
 
         events         = []
-        conf_threshold = 0.40
+        conf_threshold = 0.50
+        # RMS threshold — ถ้า clip เงียบเกินไป (ไม่มีเสียงหายใจ) ข้ามเลย
+        # ป้องกัน false positive จากห้องเงียบ
+        SILENCE_RMS    = 0.002
+
+        # คำนวณ RMS ของทั้ง chunk เพื่อดูว่ามีเสียงจริงหรือไม่
+        chunk_rms = float(np.sqrt(np.mean(y_full**2)))
+        print(f'[ANALYZE] chunk_rms={chunk_rms:.6f} threshold={SILENCE_RMS}')
+        if chunk_rms < SILENCE_RMS:
+            print(f'[ANALYZE] chunk too quiet (rms={chunk_rms:.6f}) — skipping inference')
+            del y_full
+            gc.collect()
+            return {'success': True, 'duration': round(total_duration),
+                    'ahi': 0, 'riskLabel': 'ปกติ', 'apneaCount': 0, 'snoreCount': 0,
+                    'events': [], 'engine': 'ai-server'}
 
         for i in range(n_clips):
             offset = i * clip_hop
@@ -331,7 +345,29 @@ def analyze_audio(audio_bytes, filename='audio.m4a'):
                 clip = y_full[offset:offset+SAMPLES]
             t_start = offset / SAMPLE_RATE
 
-            # inference แต่ละ clip แล้ว cleanup
+            # ตรวจ RMS per clip — ถ้าเงียบเกินไป skip clip นี้
+            clip_rms = float(np.sqrt(np.mean(clip**2)))
+            if clip_rms < SILENCE_RMS:
+                print(f'[CLIP] t={t_start:.0f}s SKIP (rms={clip_rms:.6f} too quiet)')
+                del clip
+                continue
+
+            # ── ตรวจ pattern: apnea ต้องมีช่วงเงียบ ──
+            # แบ่ง clip เป็น frame เล็กๆ แล้วดูว่ามีกี่ frame ที่เงียบ
+            frame_len    = int(0.5 * SAMPLE_RATE)  # frame 0.5 วินาที
+            n_frames_chk = len(clip) // frame_len
+            silent_frames = 0
+            for fi in range(n_frames_chk):
+                frame_data = clip[fi*frame_len:(fi+1)*frame_len]
+                frame_rms  = float(np.sqrt(np.mean(frame_data**2)))
+                if frame_rms < SILENCE_RMS * 2:
+                    silent_frames += 1
+            silence_ratio = silent_frames / max(n_frames_chk, 1)
+            # apnea ต้องมีอย่างน้อย 30% ของ clip ที่เงียบ (ช่วงหยุดหายใจ)
+            # ถ้าดังทั้ง clip = น่าจะเป็นกรน ไม่ใช่ apnea
+            has_silence = silence_ratio >= 0.30
+
+            # inference
             spec   = audio_to_logmel(clip)
             tensor = torch.FloatTensor(spec).unsqueeze(0).unsqueeze(0)
             with torch.no_grad():
@@ -342,11 +378,13 @@ def analyze_audio(audio_bytes, filename='audio.m4a'):
             conf      = float(probs[predicted])
             t_str     = f'{int(t_start//3600):02d}:{int((t_start%3600)//60):02d}:{int(t_start%60):02d}'
 
-            print(f'[CLIP] t={t_start:.0f}s probs={[round(float(p),3) for p in probs.tolist()]} pred={predicted} conf={conf:.3f}')
+            print(f'[CLIP] t={t_start:.0f}s rms={clip_rms:.4f} silence_ratio={silence_ratio:.2f} has_silence={has_silence} probs={[round(float(p),3) for p in probs.tolist()]} pred={predicted} conf={conf:.3f}')
 
-            if predicted == 1 and conf >= conf_threshold:
+            if predicted == 1 and conf >= conf_threshold and has_silence:
                 events.append({'type': 'apnea', 'time': t_str, 'timestamp': float(t_start),
                                'confidence': round(conf*100,1), 'msg': f'หยุดหายใจ ({conf*100:.0f}%)'})
+            elif predicted == 1 and not has_silence:
+                print(f'[CLIP] t={t_start:.0f}s REJECTED — model said apnea but no silence detected (likely snoring)')
 
             # cleanup ทันทีทุก clip
             del spec, tensor, logits, probs, clip
@@ -354,6 +392,21 @@ def analyze_audio(audio_bytes, filename='audio.m4a'):
 
         del y_full
         gc.collect()
+
+        # ── Deduplicate: apnea events ที่อยู่ใกล้กัน (< 10 วิ) ถือว่าเป็น event เดียว ──
+        if len(events) > 1:
+            events.sort(key=lambda e: e['timestamp'])
+            deduped = [events[0]]
+            for ev in events[1:]:
+                last = deduped[-1]
+                if ev['timestamp'] - last['timestamp'] < CLIP_DURATION:
+                    # อยู่ใกล้กัน — เก็บตัวที่ confidence สูงกว่า
+                    if ev['confidence'] > last['confidence']:
+                        deduped[-1] = ev
+                else:
+                    deduped.append(ev)
+            print(f'[DEDUP] {len(events)} events → {len(deduped)} after dedup')
+            events = deduped
 
         apnea_count = sum(1 for e in events if e['type'] == 'apnea')
         ahi         = round(apnea_count / max(total_duration/3600, 1/60), 1)
