@@ -1,6 +1,8 @@
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch==2.2.0+cpu
 numpy==1.26.4
+librosa==0.10.2
+soundfile==0.12.1
 Flask==3.0.0
 flask-cors==4.0.0
 bcrypt==4.1.2
