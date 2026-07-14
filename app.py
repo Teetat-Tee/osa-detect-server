@@ -307,21 +307,6 @@ def analyze_audio(audio_bytes, filename='audio.m4a'):
                 del clip
                 continue
 
-            # ── ตรวจ pattern: apnea ต้องมีช่วงเงียบ ──
-            # แบ่ง clip เป็น frame เล็กๆ แล้วดูว่ามีกี่ frame ที่เงียบ
-            frame_len    = int(0.5 * SAMPLE_RATE)  # frame 0.5 วินาที
-            n_frames_chk = len(clip) // frame_len
-            silent_frames = 0
-            for fi in range(n_frames_chk):
-                frame_data = clip[fi*frame_len:(fi+1)*frame_len]
-                frame_rms  = float(np.sqrt(np.mean(frame_data**2)))
-                if frame_rms < SILENCE_RMS * 2:
-                    silent_frames += 1
-            silence_ratio = silent_frames / max(n_frames_chk, 1)
-            # apnea ต้องมีอย่างน้อย 30% ของ clip ที่เงียบ (ช่วงหยุดหายใจ)
-            # ถ้าดังทั้ง clip = น่าจะเป็นกรน ไม่ใช่ apnea
-            has_silence = silence_ratio >= 0.30
-
             # inference
             spec   = audio_to_logmel(clip)
             tensor = torch.FloatTensor(spec).unsqueeze(0).unsqueeze(0)
@@ -333,13 +318,11 @@ def analyze_audio(audio_bytes, filename='audio.m4a'):
             conf      = float(probs[predicted])
             t_str     = f'{int(t_start//3600):02d}:{int((t_start%3600)//60):02d}:{int(t_start%60):02d}'
 
-            print(f'[CLIP] t={t_start:.0f}s rms={clip_rms:.4f} silence_ratio={silence_ratio:.2f} has_silence={has_silence} probs={[round(float(p),3) for p in probs.tolist()]} pred={predicted} conf={conf:.3f}')
+            print(f'[CLIP] t={t_start:.0f}s rms={clip_rms:.4f} probs={[round(float(p),3) for p in probs.tolist()]} pred={predicted} conf={conf:.3f}')
 
-            if predicted == 1 and conf >= conf_threshold and has_silence:
+            if predicted == 1 and conf >= conf_threshold:
                 events.append({'type': 'apnea', 'time': t_str, 'timestamp': float(t_start),
                                'confidence': round(conf*100,1), 'msg': f'หยุดหายใจ ({conf*100:.0f}%)'})
-            elif predicted == 1 and not has_silence:
-                print(f'[CLIP] t={t_start:.0f}s REJECTED — model said apnea but no silence detected (likely snoring)')
 
             # cleanup ทันทีทุก clip
             del spec, tensor, logits, probs, clip
