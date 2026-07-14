@@ -4,11 +4,9 @@ Render.com + PostgreSQL
 """
 
 import os, json, tempfile, hashlib, subprocess
-os.environ['NUMBA_CACHE_DIR'] = '/tmp'
 import numpy as np
 import torch
 import torch.nn as nn
-import librosa
 import bcrypt
 import jwt
 import psycopg2
@@ -212,17 +210,65 @@ def softmax(x):
     return e / e.sum()
 
 # ── Mel filterbank สร้างครั้งเดียว (cache) ──
+# ── Mel filterbank (cache — สร้างครั้งเดียว) ──
+_MEL_FB = None
+
+def _get_mel_filterbank():
+    global _MEL_FB
+    if _MEL_FB is not None:
+        return _MEL_FB
+    def hz_to_mel(hz):
+        return 2595.0 * np.log10(1.0 + hz / 700.0)
+    def mel_to_hz(mel):
+        return 700.0 * (10.0 ** (mel / 2595.0) - 1.0)
+    n_freqs = N_FFT // 2 + 1
+    mel_min = hz_to_mel(0)
+    mel_max = hz_to_mel(SAMPLE_RATE / 2)
+    mel_pts = np.linspace(mel_min, mel_max, N_MELS + 2)
+    hz_pts  = mel_to_hz(mel_pts)
+    bins    = np.floor((N_FFT + 1) * hz_pts / SAMPLE_RATE).astype(int)
+    fb = np.zeros((N_MELS, n_freqs), dtype=np.float32)
+    for m in range(1, N_MELS + 1):
+        f_left, f_center, f_right = bins[m-1], bins[m], bins[m+1]
+        for k in range(f_left, f_center):
+            if f_center > f_left:
+                fb[m-1, k] = (k - f_left) / (f_center - f_left)
+        for k in range(f_center, f_right):
+            if f_right > f_center:
+                fb[m-1, k] = (f_right - k) / (f_right - f_center)
+    _MEL_FB = fb
+    return fb
+
+_HANN = np.hanning(N_FFT).astype(np.float32)
+
 def audio_to_logmel(y):
-    """คำนวณ log-mel spectrogram ด้วย librosa — ตรงกับ training"""
+    """คำนวณ log-mel spectrogram ด้วย numpy — ตรงกับ librosa (center padding)"""
     if len(y) < SAMPLES:
         y = np.pad(y, (0, SAMPLES - len(y)))
     else:
         y = y[:SAMPLES]
     y = y.astype(np.float32)
-    mel     = librosa.feature.melspectrogram(
-        y=y, sr=SAMPLE_RATE, n_mels=N_MELS,
-        n_fft=N_FFT, hop_length=HOP_LENGTH)
-    log_mel = librosa.power_to_db(mel, ref=np.max)
+
+    # ── center padding เหมือน librosa ──
+    pad_len = N_FFT // 2
+    y = np.pad(y, (pad_len, pad_len), mode='reflect')
+
+    n_frames = 1 + (len(y) - N_FFT) // HOP_LENGTH
+    fb       = _get_mel_filterbank()
+    n_freqs  = N_FFT // 2 + 1
+
+    power = np.empty((n_freqs, n_frames), dtype=np.float32)
+    for i in range(n_frames):
+        start = i * HOP_LENGTH
+        frame = y[start:start+N_FFT] * _HANN
+        spec  = np.fft.rfft(frame, n=N_FFT)
+        power[:, i] = (spec.real**2 + spec.imag**2).astype(np.float32)
+
+    mel     = fb @ power
+    # power_to_db เหมือน librosa: 10 * log10(mel / max)
+    ref     = mel.max()
+    log_mel = 10.0 * np.log10(np.maximum(mel, 1e-10) / max(ref, 1e-10))
+    # normalize 0-1
     log_mel = (log_mel - log_mel.min()) / (log_mel.max() - log_mel.min() + 1e-8)
     return log_mel.astype(np.float32)
 
