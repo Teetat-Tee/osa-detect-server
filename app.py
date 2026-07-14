@@ -4,13 +4,8 @@ Render.com + PostgreSQL
 """
 
 import os, json, tempfile, hashlib, subprocess
+os.environ['NUMBA_CACHE_DIR'] = '/tmp'
 import numpy as np
-
-# disable numba JIT — ลด RAM 100MB+ librosa ยังทำงานได้ปกติ
-import os as _os
-_os.environ['NUMBA_DISABLE_JIT'] = '1'
-_os.environ['NUMBA_CACHE_DIR']   = '/tmp'
-
 import torch
 import torch.nn as nn
 import librosa
