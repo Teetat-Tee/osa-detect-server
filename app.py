@@ -276,7 +276,7 @@ def analyze_audio(audio_bytes, filename='audio.m4a'):
         print(f'[ANALYZE] duration={total_duration:.1f}s n_clips={n_clips} CLIP_DURATION={CLIP_DURATION}')
 
         events         = []
-        conf_threshold = 0.50
+        conf_threshold = 0.35  # ลดจาก 0.50 เพื่อ detect ได้มากขึ้น
         # RMS threshold — ถ้า clip เงียบเกินไป (ไม่มีเสียงหายใจ) ข้ามเลย
         # ป้องกัน false positive จากห้องเงียบ
         SILENCE_RMS    = 0.002
